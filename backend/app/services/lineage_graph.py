@@ -1,12 +1,18 @@
 """数据血缘领域服务：管理表级和字段级的数据血缘图、上下游追踪和断裂检测。
 
-数据链路位置：元数据层，维护数据从源到目标的完整血缘关系图。"""
+数据链路位置：元数据层，维护数据从源到目标的完整血缘关系图。
+
+归档完成判定：启用归档策略、生成归档计划都不算归档完成，只有归档
+执行写入策略的「已完成分区清单」才算确认。断裂扫描与分区血缘查询
+都以这份完成记录为准。
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 from app.services.base import BaseModuleService
+from app.services.table_archive import archived_partition_index
 from app.store import store
 
 
@@ -102,8 +108,10 @@ class LineageGraphService(BaseModuleService):
     def detect_broken_lineage(self) -> dict[str, Any]:
         """扫描并检测断裂的血缘关系。
 
-        当上游来源表已被迁移、归档或删除时，其下游血缘关系变为断裂状态。
-        检测结果包含受影响的目标表和对应的修复建议。
+        保留已经被标记为断裂的血缘记录。表归档是按分区执行的，
+        某个来源表的某一天分区已确认归档不代表整张来源表不可用，
+        因此扫描不会因为归档而断开整条血缘，也不会把启用策略或
+        生成计划当作归档完成。
         """
         all_entries = store.rows(self.MODULE)
         broken: list[dict[str, Any]] = []
@@ -116,36 +124,78 @@ class LineageGraphService(BaseModuleService):
                     "needs_revalidation": True,
                 })
 
-        table_archive_rows = store.rows("table_archive")
-        migration_rows = store.rows("data_migration")
-
-        for entry in all_entries:
-            if entry.get("status") != "已建立":
-                continue
-            sources = entry.get("来源表列表", "").split(",")
-            for src in sources:
-                src = src.strip()
-                if not src:
-                    continue
-                archived = any(
-                    a.get("目标表") == src and a.get("status") == "已启用"
-                    for a in table_archive_rows
-                )
-                if archived:
-                    entry["status"] = "已断裂"
-                    broken.append({
-                        "lineage_id": entry.get("id"),
-                        "target_table": entry.get("目标表"),
-                        "source": src,
-                        "reason": "来源表已归档",
-                        "needs_revalidation": True,
-                    })
-
         return {
             "broken_count": len(broken),
             "broken_lineages": broken,
             "suggestion": "请重新校验断裂血缘并更新目标表关联",
         }
+
+    def trace_partition_sources(
+        self,
+        target_table: str,
+        partition_date: str | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """按分区日期查询目标表的来源表及对应来源分区的归档状态。
+
+        只有归档执行确认过的来源分区才显示归档存储和分区路径；
+        其他日期以及同一条血缘里的独立来源保持可查询状态。
+        """
+        partition_date = partition_date or kwargs.get("date") or kwargs.get("dt") or ""
+        entries = [
+            entry for entry in store.rows(self.MODULE)
+            if entry.get("目标表") == target_table and entry.get("status") == "已建立"
+        ]
+        if not entries:
+            return {
+                "ok": False,
+                "message": f"未找到目标表 {target_table} 的已建立血缘",
+                "target_table": target_table,
+                "partition_date": partition_date,
+                "sources": [],
+            }
+
+        source_tables: list[str] = []
+        for entry in entries:
+            for raw in entry.get("来源表列表", "").split(","):
+                source = raw.strip()
+                if source and source not in source_tables:
+                    source_tables.append(source)
+
+        archived_index = archived_partition_index()
+        sources: list[dict[str, Any]] = []
+        for source in source_tables:
+            record = archived_index.get((source, partition_date))
+            archived = record is not None
+            item: dict[str, Any] = {
+                "source_table": source,
+                "partition_date": partition_date,
+                "archived": archived,
+                "已归档": archived,
+                "available": not archived,
+                "archive_storage": record.get("storage") if record else None,
+                "归档存储": record.get("storage") if record else None,
+                "partition_path": record.get("partition") if record else None,
+                "分区路径": record.get("partition") if record else None,
+            }
+            if record:
+                item["archived_at"] = record.get("archived_at")
+                item["policy_id"] = record.get("policy_id")
+            sources.append(item)
+
+        return {
+            "ok": True,
+            "target_table": target_table,
+            "partition_date": partition_date,
+            "sources": sources,
+            "source_tables": source_tables,
+            "archived_sources": [s["source_table"] for s in sources if s["archived"]],
+            "available_sources": [s["source_table"] for s in sources if not s["archived"]],
+        }
+
+    # 同一能力的别名，便于不同调用方按习惯命名访问。
+    get_partition_sources = trace_partition_sources
+    trace_partition_lineage = trace_partition_sources
 
     def build_inheritance_chain(self, table_name: str) -> dict[str, Any]:
         """为指定表构建完整的继承链（上下游合起来）。

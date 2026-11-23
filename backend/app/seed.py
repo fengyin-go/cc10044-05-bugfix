@@ -78,6 +78,9 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
         {"id": 4, "status": "已断裂", "pending": False, "abnormal": True,
          "目标表": "report_monthly_finance", "来源表列表": "legacy_gl_journal, dim_fiscal_period",
          "转换逻辑": "财务月报汇总", "中间层级": "报表", "血缘深度": "2"},
+        {"id": 5, "status": "已建立", "pending": False, "abnormal": False,
+         "目标表": "dws_sales", "来源表列表": "ods_live, ods_other",
+         "转换逻辑": "实时订单流与离线订单汇总关联", "中间层级": "DWS", "血缘深度": "2"},
     ],
     "backfill_task": [
         {"id": 1, "status": "运行中", "pending": True, "abnormal": False,
@@ -103,6 +106,12 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
         {"id": 3, "status": "已停用", "pending": False, "abnormal": True,
          "策略名称": "deprecated_user_clicks_archive", "目标表": "user_clicks_2024",
          "归档条件": "所有分区", "归档存储": "S3_IA", "原始保留天数": "30"},
+        {"id": 4, "status": "已启用", "pending": False, "abnormal": False,
+         "策略名称": "ods_live_20d_archive", "目标表": "ods_live",
+         "归档条件": "分区日期早于 20 天", "归档存储": "S3_IA", "原始保留天数": "20"},
+        {"id": 5, "status": "已启用", "pending": False, "abnormal": False,
+         "策略名称": "ods_live_cold_storage_archive", "目标表": "ods_live",
+         "归档条件": "分区日期早于 20 天", "归档存储": "S3_Glacier", "原始保留天数": "20"},
     ],
     "agg_builder": [
         {"id": 1, "status": "已启用", "pending": False, "abnormal": False,
